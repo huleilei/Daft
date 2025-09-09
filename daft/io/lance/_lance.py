@@ -221,3 +221,121 @@ def merge_columns(
         daft_remote_args=daft_remote_args,
         concurrency=concurrency,
     )
+
+
+@PublicAPI
+def create_fts_index(
+    url: str,
+    io_config: Optional[IOConfig] = None,
+    *,
+    column: str,
+    index_type: str = "INVERTED",
+    name: Optional[str] = None,
+    replace: bool = True,
+    train: bool = True,
+    fragment_ids: Optional[list[int]] = None,
+    fragment_uuid: Optional[str] = None,
+    storage_options: Optional[dict[str, Any]] = None,
+    daft_remote_args: Optional[dict[str, Any]] = None,
+    concurrency: Optional[int] = None,
+    version: Optional[Union[int, str]] = None,
+    asof: Optional[str] = None,
+    block_size: Optional[int] = None,
+    commit_lock: Optional[Any] = None,
+    index_cache_size: Optional[int] = None,
+    default_scan_options: Optional[dict[str, Any]] = None,
+    metadata_cache_size_bytes: Optional[int] = None,
+    **kwargs: Any,
+) -> None:
+    """Build a distributed full-text search index using Daft's distributed computing.
+
+    This function distributes the index building process across multiple Daft workers,
+    with each worker building indices for a subset of fragments. The indices are then
+    merged and committed as a single index.
+
+    Args:
+        dataset: Lance dataset or URI to build index on
+        column: Column name to index
+        index_type: Type of index to build ("INVERTED" or "FTS")
+        name: Name of the index (generated if None)
+        concurrency: Number of Daft workers to use
+        io_config: A custom IOConfig to use when accessing Lance data. Defaults to None.
+        storage_options: Storage options for the dataset
+        daft_remote_args: Options for Daft remote execution (e.g., num_cpus, num_gpus, memory_bytes)
+        **kwargs: Additional arguments to pass to create_scalar_index
+
+    Returns:
+        Updated Lance dataset with the index created
+
+    Raises:
+        ValueError: If input parameters are invalid
+        TypeError: If column type is not string
+        RuntimeError: If index building fails
+        ImportError: If lance package is not available
+
+    Note:
+        This function requires the use of [LanceDB](https://lancedb.github.io/lancedb/), which is the Python library for the LanceDB project.
+
+    Examples:
+        Create a distributed inverted index:
+        >>> import daft
+        >>> dataset = daft.io.lance.create_fts_index(
+        ...     "s3://my-bucket/dataset/", column="text_content", index_type="INVERTED", concurrency=8
+        ... )
+
+        Create an index with custom Daft remote arguments:
+        >>> dataset = daft.io.lance.create_fts_index(
+        ...     "s3://my-bucket/dataset/",
+        ...     column="description",
+        ...     daft_remote_args={"num_cpus": 2, "memory_bytes": 4 * 1024**3},
+        ... )
+    """
+    try:
+        import lance
+        from packaging import version as packaging_version
+
+        from daft.io.lance.lance_fts_index import create_fts_index_internal
+
+        lance_version = packaging_version.parse(lance.__version__)
+        min_required_version = packaging_version.parse("0.36.0")
+        if lance_version < min_required_version:
+            raise RuntimeError(
+                f"Distributed indexing requires pylance >= 0.36.0, but found {lance.__version__}. "
+                "The distribute-related interfaces are not available in older versions. "
+                "Please upgrade pylance by running: pip install --upgrade pylance"
+            )
+    except ImportError as e:
+        raise ImportError(
+            "Unable to import the `lance` package, please ensure that Daft is installed with the lance extra dependency: `pip install daft[lance]`"
+        ) from e
+
+    io_config = context.get_context().daft_planning_config.default_io_config if io_config is None else io_config
+    storage_options = storage_options or io_config_to_storage_options(io_config, url)
+
+    lance_ds = lance.dataset(
+        url,
+        storage_options=storage_options,
+        version=version,
+        asof=asof,
+        block_size=block_size,
+        commit_lock=commit_lock,
+        index_cache_size=index_cache_size,
+        default_scan_options=default_scan_options,
+        metadata_cache_size_bytes=metadata_cache_size_bytes,
+    )
+
+    create_fts_index_internal(
+        lance_ds=lance_ds,
+        uri=url,
+        column=column,
+        index_type=index_type,
+        name=name,
+        replace=replace,
+        train=train,
+        fragment_ids=fragment_ids,
+        fragment_uuid=fragment_uuid,
+        storage_options=storage_options,
+        daft_remote_args=daft_remote_args,
+        concurrency=concurrency,
+        **kwargs,
+    )
