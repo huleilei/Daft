@@ -122,7 +122,7 @@ from daft.session import (
     write_table,
 )
 from daft.udf import udf, _DaftFuncDecorator as func
-from daft.io import (
+from daft.io import (  # type: ignore
     DataCatalogTable,
     DataCatalogType,
     IOConfig,

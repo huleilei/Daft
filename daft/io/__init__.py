@@ -15,6 +15,7 @@ from daft.io.delta_lake._deltalake import read_deltalake
 from daft.io.hudi._hudi import read_hudi
 from daft.io.iceberg._iceberg import read_iceberg
 from daft.io.lance._lance import read_lance, merge_columns
+from daft.io.lance import create_fts_index
 from daft.io._json import read_json
 from daft.io._parquet import read_parquet
 from daft.io._sql import read_sql
@@ -43,6 +44,7 @@ __all__ = [
     "S3Credentials",
     "UnityConfig",
     "_range",
+    "create_fts_index",
     "from_glob_path",
     "merge_columns",
     "read_csv",
