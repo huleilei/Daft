@@ -104,9 +104,10 @@ def create_scalar_index_internal(
     storage_options: dict[str, str] | None = None,
     daft_remote_args: dict[str, Any] | None = None,
     concurrency: int | None = None,
+    partition_num: int | None = None,
     **kwargs: Any,
 ) -> None:
-    """Internal implementation of distributed FTS index creation using Daft UDFs.
+    """Internal implementation of distributed FTS/BTREE index creation using Daft UDFs.
 
     This function implements the 3-phase distributed indexing workflow:
     Phase 1: Fragment parallel processing using Daft UDFs
@@ -117,9 +118,9 @@ def create_scalar_index_internal(
         raise ValueError("Column name cannot be empty")
 
     # Handle index_type validation
-    if index_type not in ["INVERTED", "FTS"]:
+    if index_type not in ["INVERTED", "FTS", "BTREE"]:
         raise ValueError(
-            f"Distributed indexing currently only supports 'INVERTED' and 'FTS' index types, not '{index_type}'"
+            f"Distributed indexing currently only supports 'INVERTED', 'FTS', and 'BTREE' index types, not '{index_type}'"
         )
 
     # Validate column exists and has correct type
@@ -179,7 +180,14 @@ def create_scalar_index_internal(
 
     logger.info("Starting fragment parallel processing. And create DataFrame with fragment batches")
     fragment_data = distribute_fragments_balanced(fragments, concurrency)
-    df = from_pylist(fragment_data)
+
+    effective_partition_num = partition_num or 1
+    effective_partition_num = min(len(fragment_data), effective_partition_num)
+    assert effective_partition_num > 0
+    if effective_partition_num == 1:
+        df = from_pylist(fragment_data)
+    else:
+        df = from_pylist(fragment_data).repartition(effective_partition_num)
 
     daft_remote_args = daft_remote_args or {}
     num_cpus = daft_remote_args.get("num_cpus", _UnsetMarker)
