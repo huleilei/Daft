@@ -214,7 +214,7 @@ class TestDistributedIndexing:
 
         with pytest.raises(
             ValueError,
-            match=r"Distributed indexing currently only supports 'INVERTED' and 'FTS' index types, not 'INVALID'",
+            match=r"Distributed indexing currently only supports 'INVERTED', 'FTS', and 'BTREE' index types, not 'INVALID'",
         ):
             create_scalar_index(
                 uri=dataset_uri,
@@ -319,6 +319,50 @@ class TestDistributedIndexing:
         updated_dataset = lance.dataset(dataset_uri)
         indices = updated_dataset.list_indices()
         assert len(indices) > 0, "No indices found after building"
+
+    def test_build_distributed_index_default_concurrency(self, multi_fragment_lance_dataset):
+        """Test that default concurrency (None) works for index creation."""
+        dataset_uri = multi_fragment_lance_dataset
+
+        create_scalar_index(
+            uri=dataset_uri,
+            column="text",
+            index_type="INVERTED",
+        )
+
+        updated_dataset = lance.dataset(dataset_uri)
+        indices = updated_dataset.list_indices()
+        assert len(indices) > 0, "No indices found after building with default concurrency"
+
+    def test_build_distributed_index_partition_num_variants(self, multi_fragment_lance_dataset):
+        """Test that different partition_num values succeed."""
+        dataset_uri = multi_fragment_lance_dataset
+
+        for partition_num in (1, 4, 100):
+            create_scalar_index(
+                uri=dataset_uri,
+                column="text",
+                index_type="INVERTED",
+                concurrency=2,
+                partition_num=partition_num,
+            )
+
+        updated_dataset = lance.dataset(dataset_uri)
+        indices = updated_dataset.list_indices()
+        assert len(indices) > 0, "No indices found after building with partition_num variants"
+
+    def test_build_distributed_index_partition_num_negative(self, multi_fragment_lance_dataset):
+        """Test that negative partition_num raises an assertion error."""
+        dataset_uri = multi_fragment_lance_dataset
+
+        with pytest.raises(AssertionError):
+            create_scalar_index(
+                uri=dataset_uri,
+                column="text",
+                index_type="INVERTED",
+                concurrency=2,
+                partition_num=-1,
+            )
 
     def test_build_distributed_index_replace_false_existing_index(self, multi_fragment_lance_dataset):
         """Test that replace=False raises error when trying to create index with existing name."""

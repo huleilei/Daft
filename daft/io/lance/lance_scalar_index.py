@@ -8,29 +8,17 @@ if TYPE_CHECKING:
     import pathlib
 
 import lance
+import daft
 
 from daft import DataType, from_pylist
 from daft.dependencies import pa
 from daft.io.lance.utils import distribute_fragments_balanced
-from daft.udf import udf
-from daft.udf.legacy import _UnsetMarker
 
 logger = logging.getLogger(__name__)
 
 
-@udf(
-    return_dtype=DataType.struct(
-        {
-            "status": DataType.string(),
-            "fragment_ids": DataType.list(DataType.int32()),
-            "fields": DataType.list(DataType.int32()),
-            "uuid": DataType.string(),
-            "error": DataType.string(),
-        }
-    )
-)
 class FragmentIndexHandler:
-    """UDF handler for distributed fragment index creation."""
+    """Handler for distributed fragment index creation."""
 
     def __init__(
         self,
@@ -50,16 +38,20 @@ class FragmentIndexHandler:
         self.replace = replace
         self.kwargs = kwargs
 
-    def __call__(self, fragment_ids_batch: list[list[int]]) -> list[dict[str, Any]]:
+    @daft.method(
+        return_dtype=DataType.struct(
+            {
+                "status": DataType.string(),
+                "fragment_ids": DataType.list(DataType.int32()),
+                "fields": DataType.list(DataType.int32()),
+                "uuid": DataType.string(),
+                "error": DataType.string(),
+            }
+        )
+    )
+    def __call__(self, fragment_ids: list[int]) -> dict[str, Any]:
         """Process a batch of fragment IDs for index creation."""
-        results: list[dict[str, Any]] = []
-        for fragment_ids in fragment_ids_batch:
-            try:
-                results.append(self._handle_fragment_index(fragment_ids))
-            except Exception as e:
-                logger.exception("Error creating fragment index for fragment_ids %s: %s", fragment_ids, e)
-                results.append({"status": "error", "fragment_ids": fragment_ids, "error": str(e)})
-        return results
+        return self._handle_fragment_index(fragment_ids)
 
     def _handle_fragment_index(self, fragment_ids: list[int]) -> dict[str, Any]:
         """Handle index creation for a single fragment."""
@@ -163,7 +155,7 @@ def create_scalar_index_internal(
     if concurrency <= 0:
         raise ValueError(f"concurrency must be positive, got {concurrency}")
 
-    if concurrency > len(fragment_ids_to_use):
+    if concurrency > len(fragment_ids_to_use) and len(fragment_ids_to_use) > 0:
         concurrency = len(fragment_ids_to_use)
         logger.info("Adjusted concurrency to %d to match fragment count", concurrency)
 
@@ -190,25 +182,25 @@ def create_scalar_index_internal(
         df = from_pylist(fragment_data).repartition(effective_partition_num)
 
     daft_remote_args = daft_remote_args or {}
-    num_cpus = daft_remote_args.get("num_cpus", _UnsetMarker)
-    num_gpus = daft_remote_args.get("num_gpus", _UnsetMarker)
-    memory_bytes = daft_remote_args.get("memory_bytes", _UnsetMarker)
-    batch_size = daft_remote_args.get("batch_size", _UnsetMarker)
+    use_process = daft_remote_args.get("use_process")
+    num_gpus = daft_remote_args.get("num_gpus", 0)
 
-    handler_fragment_udf = (
-        FragmentIndexHandler.with_init_args(  # type: ignore[attr-defined]
-            lance_ds=lance_ds,
-            column=column,
-            index_type=index_type,
-            name=name,
-            fragment_uuid=index_id,
-            replace=replace,
-            **kwargs,
-        )
-        .override_options(num_cpus=num_cpus, num_gpus=num_gpus, memory_bytes=memory_bytes, batch_size=batch_size)
-        .with_concurrency(concurrency)
+    WrappedHandler = daft.cls(
+        FragmentIndexHandler,
+        gpus=num_gpus or 0,
+        use_process=use_process,
+        max_concurrency=concurrency,
     )
-    df = df.with_column("index_result", handler_fragment_udf(df["fragment_ids"]))
+    handler = WrappedHandler(
+        lance_ds=lance_ds,
+        column=column,
+        index_type=index_type,
+        name=name,
+        fragment_uuid=index_id,
+        replace=replace,
+        **kwargs,
+    )
+    df = df.with_column("index_result", handler(df["fragment_ids"]))
 
     results = df.to_pandas()["index_result"]
 
