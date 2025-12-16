@@ -255,7 +255,7 @@ def create_scalar_index(
     partition_num: Optional[int] = None,
     **kwargs: Any,
 ) -> None:
-    """Build a distributed full-text search index using Daft's distributed computing.
+    """Build a distributed scalar index using Daft's distributed execution.
 
     This function distributes the index building process across multiple Daft workers,
     with each worker building indices for a subset of fragments. The indices are then
@@ -278,6 +278,7 @@ def create_scalar_index(
         index_cache_size: Size of the index cache
         default_scan_options: Default scan options for the dataset
         metadata_cache_size_bytes: Size of the metadata cache in bytes
+        partition_num: Number of partitions to use for repartitioning fragment batches
         **kwargs: Additional arguments to pass to create_scalar_index
 
     Returns:
@@ -285,7 +286,7 @@ def create_scalar_index(
 
     Raises:
         ValueError: If input parameters are invalid
-        TypeError: If column type is not string
+        TypeError: If column type is incompatible with the chosen ``index_type``
         RuntimeError: If index building fails
         ImportError: If lance package is not available
 

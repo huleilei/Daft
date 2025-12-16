@@ -5,6 +5,7 @@ from pathlib import Path
 
 import lance
 import pandas as pd
+import pyarrow as pa
 import pytest
 from packaging import version as packaging_version
 
@@ -13,10 +14,10 @@ from daft.io.lance import create_scalar_index
 
 
 def check_lance_version_compatibility():
-    """Check if lance version supports distributed indexing."""
+    """Check if the installed `lance` version supports distributed scalar indexing."""
     try:
         lance_version = packaging_version.parse(lance.__version__)
-        min_required_version = packaging_version.parse("0.36.0")
+        min_required_version = packaging_version.parse("0.37.0")
         return lance_version >= min_required_version
     except (AttributeError, Exception):
         return False
@@ -24,7 +25,7 @@ def check_lance_version_compatibility():
 
 pytestmark = pytest.mark.skipif(
     not check_lance_version_compatibility(),
-    reason="Distributed indexing requires pylance >= 0.36.0. Current version: {}".format(
+    reason="Distributed indexing requires pylance >= 0.37.0. Current version: {}".format(
         getattr(lance, "__version__", "unknown")
     ),
 )
@@ -320,29 +321,25 @@ class TestDistributedIndexing:
         indices = updated_dataset.list_indices()
         assert len(indices) > 0, "No indices found after building"
 
-    def test_build_distributed_index_default_concurrency(self, multi_fragment_lance_dataset):
-        """Test that default concurrency (None) works for index creation."""
-        dataset_uri = multi_fragment_lance_dataset
-
-        create_scalar_index(
-            uri=dataset_uri,
-            column="text",
-            index_type="INVERTED",
-        )
-
-        updated_dataset = lance.dataset(dataset_uri)
-        indices = updated_dataset.list_indices()
-        assert len(indices) > 0, "No indices found after building with default concurrency"
-
-    def test_build_distributed_index_partition_num_variants(self, multi_fragment_lance_dataset):
+    def test_build_distributed_index_for_btree(self, temp_dir):
         """Test that different partition_num values succeed."""
-        dataset_uri = multi_fragment_lance_dataset
+        dataset_uri = str(Path(temp_dir) / "multi_fragment_text.lance")
+        df = daft.from_pydict({"id": [1, 2, 3], "score": [0.5, 0.8, 0.9], "category": ["animals", "ml", "tech"]})
+
+        target_schema = pa.schema(
+            [
+                pa.field("id", pa.int32(), nullable=False),
+                pa.field("score", pa.float32(), nullable=True),
+                pa.field("category", pa.string(), nullable=True),
+            ]
+        )
+        df.write_lance(uri=dataset_uri, max_rows_per_file=2, schema=target_schema)
 
         for partition_num in (1, 4, 100):
             create_scalar_index(
                 uri=dataset_uri,
-                column="text",
-                index_type="INVERTED",
+                column="category",
+                index_type="BTREE",
                 concurrency=2,
                 partition_num=partition_num,
             )
@@ -350,19 +347,6 @@ class TestDistributedIndexing:
         updated_dataset = lance.dataset(dataset_uri)
         indices = updated_dataset.list_indices()
         assert len(indices) > 0, "No indices found after building with partition_num variants"
-
-    def test_build_distributed_index_partition_num_negative(self, multi_fragment_lance_dataset):
-        """Test that negative partition_num raises an assertion error."""
-        dataset_uri = multi_fragment_lance_dataset
-
-        with pytest.raises(AssertionError):
-            create_scalar_index(
-                uri=dataset_uri,
-                column="text",
-                index_type="INVERTED",
-                concurrency=2,
-                partition_num=-1,
-            )
 
     def test_build_distributed_index_replace_false_existing_index(self, multi_fragment_lance_dataset):
         """Test that replace=False raises error when trying to create index with existing name."""

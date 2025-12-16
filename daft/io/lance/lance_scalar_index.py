@@ -8,9 +8,9 @@ if TYPE_CHECKING:
     import pathlib
 
 import lance
-import daft
 
-from daft import DataType, from_pylist
+import daft
+from daft import execution_config_ctx, from_pylist
 from daft.dependencies import pa
 from daft.io.lance.utils import distribute_fragments_balanced
 
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class FragmentIndexHandler:
-    """Handler for distributed fragment index creation."""
+    """Handler for distributed scalar index creation on fragment batches."""
 
     def __init__(
         self,
@@ -38,51 +38,20 @@ class FragmentIndexHandler:
         self.replace = replace
         self.kwargs = kwargs
 
-    @daft.method(
-        return_dtype=DataType.struct(
-            {
-                "status": DataType.string(),
-                "fragment_ids": DataType.list(DataType.int32()),
-                "fields": DataType.list(DataType.int32()),
-                "uuid": DataType.string(),
-                "error": DataType.string(),
-            }
+    def __call__(self, fragment_ids: list[int]) -> bool:
+        """Process a batch of fragment IDs for scalar index creation."""
+        logger.info("Building distributed scalar index for fragments %s using create_scalar_index", fragment_ids)
+
+        self.lance_ds.create_scalar_index(
+            column=self.column,
+            index_type=self.index_type,
+            name=self.name,
+            replace=self.replace,
+            fragment_uuid=self.fragment_uuid,
+            fragment_ids=fragment_ids,
+            **self.kwargs,
         )
-    )
-    def __call__(self, fragment_ids: list[int]) -> dict[str, Any]:
-        """Process a batch of fragment IDs for index creation."""
-        return self._handle_fragment_index(fragment_ids)
-
-    def _handle_fragment_index(self, fragment_ids: list[int]) -> dict[str, Any]:
-        """Handle index creation for a single fragment."""
-        try:
-            logger.info("Building distributed index for fragments %s using create_scalar_index", fragment_ids)
-
-            self.lance_ds.create_scalar_index(
-                column=self.column,
-                index_type=self.index_type,
-                name=self.name,
-                replace=self.replace,
-                fragment_uuid=self.fragment_uuid,
-                fragment_ids=fragment_ids,
-                **self.kwargs,
-            )
-
-            field_id = self.lance_ds.schema.get_field_index(self.column)
-            logger.info("Fragment index created successfully for fragments %s", fragment_ids)
-            return {
-                "status": "success",
-                "fragment_ids": fragment_ids,
-                "fields": [field_id],
-                "uuid": self.fragment_uuid,
-            }
-        except Exception as e:
-            logger.error("Fragment index task failed for fragments %s: %s", fragment_ids, str(e))
-            return {
-                "status": "error",
-                "fragment_ids": fragment_ids,
-                "error": str(e),
-            }
+        return True
 
 
 def create_scalar_index_internal(
@@ -94,26 +63,19 @@ def create_scalar_index_internal(
     name: str | None = None,
     replace: bool = True,
     storage_options: dict[str, str] | None = None,
-    daft_remote_args: dict[str, Any] | None = None,
     concurrency: int | None = None,
     partition_num: int | None = None,
     **kwargs: Any,
 ) -> None:
-    """Internal implementation of distributed FTS/BTREE index creation using Daft UDFs.
+    """Internal implementation of distributed scalar index creation.
 
-    This function implements the 3-phase distributed indexing workflow:
-    Phase 1: Fragment parallel processing using Daft UDFs
+    Supports INVERTED, FTS, and BTREE index types and runs as a 3-phase workflow:
+    Phase 1: Fragment-parallel processing using Daft distributed execution
     Phase 2: Index metadata merging
     Phase 3: Atomic index creation and commit
     """
     if not column:
         raise ValueError("Column name cannot be empty")
-
-    # Handle index_type validation
-    if index_type not in ["INVERTED", "FTS", "BTREE"]:
-        raise ValueError(
-            f"Distributed indexing currently only supports 'INVERTED', 'FTS', and 'BTREE' index types, not '{index_type}'"
-        )
 
     # Validate column exists and has correct type
     try:
@@ -127,14 +89,28 @@ def create_scalar_index_internal(
     if pa.types.is_list(field.type) or pa.types.is_large_list(field.type):
         value_type = field.type.value_type
 
-    if not pa.types.is_string(value_type) and not pa.types.is_large_string(value_type):
-        raise TypeError(f"Column {column} must be string type, got {value_type}")
+    match index_type:
+        case "INVERTED" | "FTS":
+            if not pa.types.is_string(value_type) and not pa.types.is_large_string(value_type):
+                raise TypeError(f"Column {column} must be string type for INVERTED or FTS index, got {value_type}")
+        case "BTREE":
+            if (
+                not pa.types.is_integer(value_type)
+                and not pa.types.is_floating(value_type)
+                and not pa.types.is_string(value_type)
+            ):
+                raise TypeError(f"Column {column} must be numeric or string type for BTREE index, got {value_type}")
+        case _:
+            raise ValueError(
+                f"Distributed indexing currently only supports 'INVERTED', 'FTS', and 'BTREE' index types, not '{index_type}'"
+            )
 
     # Generate index name if not provided
     if name is None:
         name = f"{column}_{index_type.lower()}_idx"
     # Handle replace parameter - check for existing index with same name
     if not replace:
+        existing_indices = []
         try:
             existing_indices = lance_ds.list_indices()
         except Exception:
@@ -149,13 +125,14 @@ def create_scalar_index_internal(
     fragment_ids_to_use = [fragment.fragment_id for fragment in fragments]
 
     # Adjust concurrency based on fragment count
-    if concurrency is None:
+    if concurrency is None or concurrency <= 0:
+        logger.warning(
+            "concurrency not specified or invalid, defaulting to 4. "
+            "To adjust concurrency, set a positive integer value."
+        )
         concurrency = 4
 
-    if concurrency <= 0:
-        raise ValueError(f"concurrency must be positive, got {concurrency}")
-
-    if concurrency > len(fragment_ids_to_use) and len(fragment_ids_to_use) > 0:
+    if concurrency > len(fragment_ids_to_use):
         concurrency = len(fragment_ids_to_use)
         logger.info("Adjusted concurrency to %d to match fragment count", concurrency)
 
@@ -163,35 +140,21 @@ def create_scalar_index_internal(
     index_id = str(uuid.uuid4())
 
     logger.info(
-        "Starting distributed FTS index creation: column=%s, type=%s, name=%s, concurrency=%s",
+        "Starting distributed scalar index creation: column=%s, type=%s, name=%s, concurrency=%s",
         column,
         index_type,
         name,
         concurrency,
     )
 
-    logger.info("Starting fragment parallel processing. And create DataFrame with fragment batches")
+    logger.info("Starting fragment-parallel processing and creating DataFrame with fragment batches")
     fragment_data = distribute_fragments_balanced(fragments, concurrency)
 
-    effective_partition_num = partition_num or 1
-    effective_partition_num = min(len(fragment_data), effective_partition_num)
-    assert effective_partition_num > 0
-    if effective_partition_num == 1:
-        df = from_pylist(fragment_data)
-    else:
-        df = from_pylist(fragment_data).repartition(effective_partition_num)
-
-    daft_remote_args = daft_remote_args or {}
-    use_process = daft_remote_args.get("use_process")
-    num_gpus = daft_remote_args.get("num_gpus", 0)
-
-    WrappedHandler = daft.cls(
+    handler_cls = daft.cls(
         FragmentIndexHandler,
-        gpus=num_gpus or 0,
-        use_process=use_process,
         max_concurrency=concurrency,
     )
-    handler = WrappedHandler(
+    handler = handler_cls(
         lance_ds=lance_ds,
         column=column,
         index_type=index_type,
@@ -200,39 +163,30 @@ def create_scalar_index_internal(
         replace=replace,
         **kwargs,
     )
-    df = df.with_column("index_result", handler(df["fragment_ids"]))
 
-    results = df.to_pandas()["index_result"]
+    with execution_config_ctx(maintain_order=False):
+        if partition_num is not None and partition_num > 1:
+            df = from_pylist(fragment_data).repartition(partition_num)
+        else:
+            df = from_pylist(fragment_data)
 
-    # Check for failures
-    failed_results = [r for r in results if r["status"] == "error"]
-    if failed_results:
-        error_messages = [r["error"] for r in failed_results]
-        raise RuntimeError(
-            f"Index building failed on {len(failed_results)} fragment batches: {'; '.join(error_messages)}"
-        )
-
-    successful_results = [r for r in results if r["status"] == "success"]
-    if not successful_results:
-        raise RuntimeError("No successful index building results")
+        df = df.select(handler(df["fragment_ids"]))
+        df.collect()
 
     logger.info("Starting index metadata merging by reloading dataset to get latest state")
     lance_ds = lance.LanceDataset(uri, storage_options=storage_options)
-
     lance_ds.merge_index_metadata(index_id, index_type)
 
     logger.info("Starting atomic index creation and commit")
-    fields = successful_results[0]["fields"]
+    field_id = lance_ds.schema.get_field_index(column)
     index = lance.Index(
         uuid=index_id,
         name=name,
-        fields=fields,
+        fields=[field_id],
         dataset_version=lance_ds.version,
         fragment_ids=set(fragment_ids_to_use),
         index_version=0,
     )
-
-    # Create and commit the index operation
     create_index_op = lance.LanceOperation.CreateIndex(
         new_indices=[index],
         removed_indices=[],
