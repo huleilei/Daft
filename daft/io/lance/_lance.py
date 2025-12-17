@@ -270,7 +270,9 @@ def create_scalar_index(
         replace: Whether to replace an existing index with the same name. Defaults to True.
         storage_options: Storage options for the dataset
         daft_remote_args: Options for Daft remote execution (e.g., num_cpus, num_gpus, memory_bytes)
-        concurrency: Number of Daft workers to use
+        concurrency: Number of Daft workers to use. If None, defaults to 4. Must be a positive
+            integer; values larger than the fragment count are clipped down to the number of
+            fragments.
         version: Version of the dataset to use
         asof: Timestamp to use for time travel queries
         block_size: Block size for the index

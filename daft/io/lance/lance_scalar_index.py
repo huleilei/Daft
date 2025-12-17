@@ -124,13 +124,11 @@ def create_scalar_index_internal(
     fragments = lance_ds.get_fragments()
     fragment_ids_to_use = [fragment.fragment_id for fragment in fragments]
 
-    # Adjust concurrency based on fragment count
-    if concurrency is None or concurrency <= 0:
-        logger.warning(
-            "concurrency not specified or invalid, defaulting to 4. "
-            "To adjust concurrency, set a positive integer value."
-        )
+    # Adjust concurrency: default to 4 and validate positive values
+    if concurrency is None:
         concurrency = 4
+    elif concurrency <= 0:
+        raise ValueError("concurrency must be positive")
 
     if concurrency > len(fragment_ids_to_use):
         concurrency = len(fragment_ids_to_use)

@@ -312,7 +312,7 @@ This example compacts a dataset with multiple fragments into a single, larger fr
 
 Daft provides a distributed scalar indexing API on top of Lance through [`daft.io.lance.create_scalar_index`][daft.io.lance.create_scalar_index]. This allows you to build full-text and scalar indexes across all fragments in a Lance dataset.
 
-The `index_type` parameter controls the type of scalar index, only support INVERTED、FTS and BTREE. For INVERTED and FTS indexes, the indexed column must be a string column, or a list/large list of strings. BTREE indexes support numeric and string columns. If the column has an incompatible type for the chosen `index_type`, Daft raises a `TypeError`.
+The `index_type` parameter controls the type of scalar index and supports INVERTED, FTS, and BTREE. For INVERTED and FTS indexes, the indexed column must be a string column or a list/large list of strings. BTREE indexes support numeric and string columns. If the column has an incompatible type for the chosen `index_type`, Daft raises a `TypeError`.
 
 === "🐍 Python"
 
@@ -345,7 +345,7 @@ The `index_type` parameter controls the type of scalar index, only support INVER
 
 `daft.io.lance.create_scalar_index` builds the index in parallel by splitting the dataset into fragment batches and running workers across them.
 
-- **`concurrency`** controls the maximum number of workers that build fragment-level indexes in parallel. If `concurrency=None`, Daft defaults to `4`. If `concurrency` is larger than the number of fragments, it is clipped down to the fragment count.
+- **`concurrency`** controls the maximum number of workers that build fragment-level indexes in parallel. If `concurrency` is `None`, Daft defaults to `4`. Concurrency must be a positive integer; values larger than the number of fragments are clipped down to the fragment count.
 - **`partition_num`** On the Ray Runner, controls how many logical batches of fragment IDs are processed when dispatching work through Daft. If `partition_num` is `None` or less than or equal to `1`, Daft processes the fragment batches without additional repartitioning. On the native runner, this option is ignored.
 
 === "🐍 Python"
