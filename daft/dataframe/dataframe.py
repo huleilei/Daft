@@ -805,7 +805,7 @@ class DataFrame:
 
         cols: Optional[list[Expression]] = None
         if partition_cols is not None:
-            cols = self.__column_input_to_expression(tuple(partition_cols))
+            cols = column_inputs_to_expressions(tuple(partition_cols))
 
         builder = self._builder.write_tabular(
             root_dir=root_dir,
@@ -871,7 +871,7 @@ class DataFrame:
 
         cols: Optional[list[Expression]] = None
         if partition_cols is not None:
-            cols = self.__column_input_to_expression(tuple(partition_cols))
+            cols = column_inputs_to_expressions(tuple(partition_cols))
 
         builder = self._builder.write_tabular(
             root_dir=root_dir,
@@ -935,7 +935,7 @@ class DataFrame:
 
         cols: Optional[list[Expression]] = None
         if partition_cols is not None:
-            cols = self.__column_input_to_expression(tuple(partition_cols))
+            cols = column_inputs_to_expressions(tuple(partition_cols))
 
         builder = self._builder.write_tabular(
             root_dir=root_dir,
@@ -1771,9 +1771,6 @@ class DataFrame:
     # DataFrame operations
     ###
 
-    def __column_input_to_expression(self, columns: Iterable[ColumnInputType]) -> list[Expression]:
-        # TODO(Kevin): remove this method and use _column_inputs_to_expressions
-        return [col(c) if isinstance(c, str) else c for c in columns]
 
     def _wildcard_inputs_to_expressions(self, columns: tuple[ManyColumnsInputType, ...]) -> list[Expression]:
         """Handles wildcard argument column inputs."""
@@ -2063,7 +2060,7 @@ class DataFrame:
             <BLANKLINE>
             (Showing first 2 of 2 rows)
         """
-        builder = self._builder.distinct(self.__column_input_to_expression(on))
+        builder = self._builder.distinct(column_inputs_to_expressions(on))
         return DataFrame(builder)
 
     @DataframePublicAPI
@@ -2560,7 +2557,7 @@ class DataFrame:
         if nulls_first is None:
             nulls_first = desc
 
-        sort_by = self.__column_input_to_expression(by)
+        sort_by = column_inputs_to_expressions(by)
 
         builder = self._builder.sort(sort_by=sort_by, descending=desc, nulls_first=nulls_first)
         return DataFrame(builder)
@@ -2720,7 +2717,7 @@ class DataFrame:
             )
             builder = self._builder.random_shuffle(num)
         else:
-            builder = self._builder.hash_repartition(num, self.__column_input_to_expression(partition_by))
+            builder = self._builder.hash_repartition(num, column_inputs_to_expressions(partition_by))
         return DataFrame(builder)
 
     @DataframePublicAPI
@@ -2855,8 +2852,8 @@ class DataFrame:
         elif join_strategy == JoinStrategy.Broadcast and join_type == JoinType.Outer:
             raise ValueError("Broadcast join does not support outer joins")
 
-        left_exprs = self.__column_input_to_expression(tuple(left_on) if isinstance(left_on, list) else (left_on,))
-        right_exprs = self.__column_input_to_expression(tuple(right_on) if isinstance(right_on, list) else (right_on,))
+        left_exprs = column_inputs_to_expressions(tuple(left_on) if isinstance(left_on, list) else (left_on,))
+        right_exprs = column_inputs_to_expressions(tuple(right_on) if isinstance(right_on, list) else (right_on,))
         builder = self._builder.join(
             other._builder,
             left_on=left_exprs,
@@ -2963,9 +2960,9 @@ class DataFrame:
 
         """
         if len(cols) == 0:
-            columns = self.__column_input_to_expression(self.column_names)
+            columns = column_inputs_to_expressions(self.column_names)
         else:
-            columns = self.__column_input_to_expression(cols)
+            columns = column_inputs_to_expressions(cols)
         float_columns = [
             column
             for column in columns
@@ -3021,9 +3018,9 @@ class DataFrame:
 
         """
         if len(cols) == 0:
-            columns = self.__column_input_to_expression(self.column_names)
+            columns = column_inputs_to_expressions(self.column_names)
         else:
-            columns = self.__column_input_to_expression(cols)
+            columns = column_inputs_to_expressions(cols)
         return self.where(~reduce(lambda x, y: x | y, (x.is_null() for x in columns)))
 
     @DataframePublicAPI
@@ -3120,7 +3117,7 @@ class DataFrame:
             (Showing first 5 of 5 rows)
 
         """
-        parsed_exprs = self.__column_input_to_expression(columns)
+        parsed_exprs = column_inputs_to_expressions(columns)
         builder = self._builder.explode(parsed_exprs)
         return DataFrame(builder)
 
@@ -4639,24 +4636,41 @@ class DataFrame:
             >>> dask_df = df.to_dask_dataframe()  # doctest: +SKIP
 
         """
-        from daft.runners.ray_runner import RayPartitionSet
-
         self.collect()
         partition_set = self._result
         assert partition_set is not None
-        # TODO(Clark): Support Dask DataFrame conversion for the local runner if
-        # Dask is using a non-distributed scheduler.
-        if not isinstance(partition_set, RayPartitionSet):
-            raise ValueError("Cannot convert to Dask DataFrame if not running on Ray backend")
-        return partition_set.to_dask_dataframe(meta)
+
+        if isinstance(partition_set, LocalPartitionSet):
+            return partition_set.to_dask_dataframe(meta)
+
+        from daft.runners.ray_runner import RayPartitionSet
+
+        if isinstance(partition_set, RayPartitionSet):
+            return partition_set.to_dask_dataframe(meta)
+
+        raise ValueError("Cannot convert to Dask DataFrame if not running on Ray or Native backend")
 
     @classmethod
     @DataframePublicAPI
     def _from_dask_dataframe(cls, ddf: "dask.DataFrame") -> "DataFrame":
         """Creates a Daft DataFrame from a Dask DataFrame."""
-        # TODO(Clark): Support Dask DataFrame conversion for the local runner if
-        # Dask is using a non-distributed scheduler.
-        if get_or_create_runner().name != "ray":
+        runner = get_or_create_runner()
+
+        if runner.name == "native":
+            parts = ddf.to_delayed()
+            micropartitions = []
+            for part in parts:
+                pandas_df = part.compute()
+                micropartitions.append(MicroPartition.from_pandas(pandas_df))
+            
+            if not micropartitions:
+                 # Create empty MicroPartition from meta
+                 meta = ddf._meta
+                 micropartitions.append(MicroPartition.from_pandas(meta))
+
+            return DataFrame(to_logical_plan_builder(*micropartitions))
+
+        if runner.name != "ray":
             raise ValueError("Daft needs to be running on the Ray Runner for this operation")
 
         from daft.runners.ray_runner import RayRunnerIO
